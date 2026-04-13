@@ -57,6 +57,13 @@ class OIOptionSellerApp:
         lot_multiplier: int   = 1,
         order_type:     str   = "LIMIT",
         limit_offset:   float = 2.0,
+        delta_min:      float = 0.25,
+        delta_max:      float = 0.33,
+        sell_prem_min:  float = 200.0,
+        sell_prem_max:  float = 300.0,
+        hedge_prem_min: float = 50.0,
+        hedge_prem_max: float = 90.0,
+        min_net_credit: float = 100.0,
         logger=None,
     ):
         self.client_id      = client_id
@@ -65,6 +72,13 @@ class OIOptionSellerApp:
         self.lot_multiplier = max(1, int(lot_multiplier))
         self.order_type     = order_type
         self.limit_offset   = limit_offset
+        self.delta_min      = float(delta_min)
+        self.delta_max      = float(delta_max)
+        self.sell_prem_min  = float(sell_prem_min)
+        self.sell_prem_max  = float(sell_prem_max)
+        self.hedge_prem_min = float(hedge_prem_min)
+        self.hedge_prem_max = float(hedge_prem_max)
+        self.min_net_credit = float(min_net_credit)
         self.logger         = logger or log
 
         self.dhan     = DhanClient(client_id, access_token, logger=self.logger)
@@ -104,6 +118,10 @@ class OIOptionSellerApp:
         self._log("🚀 OI Option Seller starting...")
         self._log(f"   Mode: {'🔴 LIVE' if self.live_mode else '📄 PAPER'}  |  "
                   f"Lots: {self.lot_multiplier}  |  Orders: {self.order_type}")
+        self._log(f"   Delta: {self.delta_min}–{self.delta_max}  |  "
+                  f"Sell ₹{self.sell_prem_min}–₹{self.sell_prem_max}  |  "
+                  f"Hedge ₹{self.hedge_prem_min}–₹{self.hedge_prem_max}  |  "
+                  f"Min Credit ₹{self.min_net_credit}")
 
         # Fetch lot size
         self._lot_size = self.dhan.fetch_nifty_lot_size()
@@ -294,7 +312,10 @@ class OIOptionSellerApp:
             # We need to find the right strike first, then check signal
             # Select candidate strike and check its signal
             sell_strike = select_sell_strike(
-                strikes, opt_type, self._nifty_ltp, logger=self.logger)
+                strikes, opt_type, self._nifty_ltp,
+                delta_min=self.delta_min, delta_max=self.delta_max,
+                sell_prem_min=self.sell_prem_min, sell_prem_max=self.sell_prem_max,
+                logger=self.logger)
 
             if sell_strike is None:
                 self._log(f"   [{leg.upper()}] No qualifying strike found for entry")
@@ -313,21 +334,23 @@ class OIOptionSellerApp:
 
             # Validate sell premium at entry
             curr_prem = sell_strike["premium"]
-            from config import SELL_PREMIUM_MIN, SELL_PREMIUM_MAX
-            if not (SELL_PREMIUM_MIN <= curr_prem <= SELL_PREMIUM_MAX):
+            if not (self.sell_prem_min <= curr_prem <= self.sell_prem_max):
                 self._log(f"   [{leg.upper()}] Premium ₹{curr_prem:.2f} outside sell range — skipping")
                 return
 
             # Select hedge
             hedge_strike = select_hedge_strike(
-                strikes, opt_type, sell_strike["strike"], self._nifty_ltp, logger=self.logger)
+                strikes, opt_type, sell_strike["strike"], self._nifty_ltp,
+                hedge_prem_min=self.hedge_prem_min, hedge_prem_max=self.hedge_prem_max,
+                logger=self.logger)
 
             if hedge_strike is None:
                 self._log(f"   [{leg.upper()}] No hedge strike found — skipping entry")
                 return
 
             # Validate net credit
-            if not validate_net_credit(curr_prem, hedge_strike["premium"], logger=self.logger):
+            if not validate_net_credit(curr_prem, hedge_strike["premium"],
+                                        min_net_credit=self.min_net_credit, logger=self.logger):
                 self._log(f"   [{leg.upper()}] Insufficient net credit — skipping")
                 return
 

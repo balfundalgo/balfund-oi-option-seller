@@ -353,23 +353,58 @@ class StrategyTab(ctk.CTkFrame):
                      text="(lot size fetched live from Dhan instrument master)",
                      font=F_SMALL, text_color=GREY_COL).pack(side="left", padx=12)
 
-        # ── Row 3: Strategy info labels ───────────────────────────────────────
+        # ── Row 3: Configurable Parameters ───────────────────────────────────
         row3 = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=10)
         row3.pack(fill="x", padx=14, pady=(0, 4))
 
-        def _badge(parent, key, val, key_col=GREY_COL, val_col=CYAN_COL):
-            ctk.CTkLabel(parent, text=key, font=F_SMALL,
-                         text_color=key_col).pack(side="left", padx=(14, 2), pady=8)
-            ctk.CTkLabel(parent, text=val, font=("Segoe UI", 11, "bold"),
-                         text_color=val_col).pack(side="left", padx=(0, 10))
+        def _param(parent, label, default, width=64, label_col=GREY_COL):
+            ctk.CTkLabel(parent, text=label, font=F_SMALL,
+                         text_color=label_col).pack(side="left", padx=(14, 4), pady=10)
+            e = ctk.CTkEntry(parent, width=width, height=30,
+                             fg_color=PANEL_BG, border_color=BORDER,
+                             text_color=WHITE_COL, font=F_MONO_S)
+            e.insert(0, str(default))
+            e.pack(side="left", padx=(0, 4))
+            return e
 
-        _badge(row3, "Delta Range:",      "0.25 – 0.33")
-        _badge(row3, "Sell Premium:",     "₹200 – ₹300")
-        _badge(row3, "Hedge Premium:",    "₹50 – ₹90")
-        _badge(row3, "Min Net Credit:",   "₹100")
-        _badge(row3, "Stop Loss:",        "38.2%", val_col=RED_COL)
-        _badge(row3, "Trail at:",         "50% decay", val_col=ORANGE_COL)
-        _badge(row3, "Checks:",           "09:30 AM  &  15:20 PM")
+        # Delta range
+        ctk.CTkLabel(row3, text="Delta:", font=("Segoe UI", 11, "bold"),
+                     text_color=CYAN_COL).pack(side="left", padx=(14, 0), pady=10)
+        self.e_delta_min = _param(row3, "Min", "0.25", width=56)
+        self.e_delta_max = _param(row3, "Max", "0.33", width=56)
+
+        # Separator
+        ctk.CTkLabel(row3, text="│", font=F_SMALL, text_color=BORDER).pack(side="left", padx=6)
+
+        # Sell premium range
+        ctk.CTkLabel(row3, text="Sell ₹:", font=("Segoe UI", 11, "bold"),
+                     text_color=ACCENT_H).pack(side="left", padx=(4, 0))
+        self.e_sell_min = _param(row3, "Min", "200", width=60)
+        self.e_sell_max = _param(row3, "Max", "300", width=60)
+
+        # Separator
+        ctk.CTkLabel(row3, text="│", font=F_SMALL, text_color=BORDER).pack(side="left", padx=6)
+
+        # Hedge premium range
+        ctk.CTkLabel(row3, text="Hedge ₹:", font=("Segoe UI", 11, "bold"),
+                     text_color=PURPLE_COL).pack(side="left", padx=(4, 0))
+        self.e_hedge_min = _param(row3, "Min", "50",  width=56)
+        self.e_hedge_max = _param(row3, "Max", "90",  width=56)
+
+        # Separator
+        ctk.CTkLabel(row3, text="│", font=F_SMALL, text_color=BORDER).pack(side="left", padx=6)
+
+        # Min net credit
+        self.e_net_credit = _param(row3, "Min Credit ₹", "100", width=60, label_col=ORANGE_COL)
+
+        # Static info badges
+        ctk.CTkLabel(row3, text="│", font=F_SMALL, text_color=BORDER).pack(side="left", padx=6)
+        ctk.CTkLabel(row3, text="SL: 38.2%", font=F_SMALL,
+                     text_color=RED_COL).pack(side="left", padx=(4, 8))
+        ctk.CTkLabel(row3, text="Trail: 50%", font=F_SMALL,
+                     text_color=ORANGE_COL).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(row3, text="Checks: 09:30 & 15:20", font=F_SMALL,
+                     text_color=GREY_COL).pack(side="left", padx=(0, 14))
 
         # ── Row 4: Buttons ────────────────────────────────────────────────────
         btn_row = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=10)
@@ -432,6 +467,13 @@ class StrategyTab(ctk.CTkFrame):
             "order_type":   self.order_dd.get(),
             "lmt_offset":   self.e_lmt.get(),
             "lot_mult":     self.lot_dd.get(),
+            "delta_min":    self.e_delta_min.get(),
+            "delta_max":    self.e_delta_max.get(),
+            "sell_min":     self.e_sell_min.get(),
+            "sell_max":     self.e_sell_max.get(),
+            "hedge_min":    self.e_hedge_min.get(),
+            "hedge_max":    self.e_hedge_max.get(),
+            "net_credit":   self.e_net_credit.get(),
         }
 
     def _apply_settings(self, s: dict):
@@ -439,8 +481,19 @@ class StrategyTab(ctk.CTkFrame):
             self._mode_var.set(s["mode"]); self._on_mode_change()
         if s.get("order_type") in ORDER_TYPES:
             self.order_dd.set(s["order_type"]); self._on_order_change(s["order_type"])
-        if s.get("lmt_offset"):
-            self.e_lmt.delete(0, "end"); self.e_lmt.insert(0, str(s["lmt_offset"]))
+
+        def _set(entry, key):
+            if s.get(key) is not None:
+                entry.delete(0, "end"); entry.insert(0, str(s[key]))
+
+        _set(self.e_lmt,        "lmt_offset")
+        _set(self.e_delta_min,  "delta_min")
+        _set(self.e_delta_max,  "delta_max")
+        _set(self.e_sell_min,   "sell_min")
+        _set(self.e_sell_max,   "sell_max")
+        _set(self.e_hedge_min,  "hedge_min")
+        _set(self.e_hedge_max,  "hedge_max")
+        _set(self.e_net_credit, "net_credit")
         if s.get("lot_mult") in LOT_MULT_OPTS:
             self.lot_dd.set(s["lot_mult"])
 
@@ -510,8 +563,15 @@ class StrategyTab(ctk.CTkFrame):
             lot_mult    = int(self.lot_dd.get())
             lmt_offset  = float(self.e_lmt.get() or 2.0)
             order_type  = self.order_dd.get()
+            delta_min   = float(self.e_delta_min.get() or 0.25)
+            delta_max   = float(self.e_delta_max.get() or 0.33)
+            sell_min    = float(self.e_sell_min.get()  or 200)
+            sell_max    = float(self.e_sell_max.get()  or 300)
+            hedge_min   = float(self.e_hedge_min.get() or 50)
+            hedge_max   = float(self.e_hedge_max.get() or 90)
+            net_credit  = float(self.e_net_credit.get() or 100)
         except ValueError:
-            messagebox.showerror("Invalid Settings", "Please check Lot Multiplier and Offset values.")
+            messagebox.showerror("Invalid Settings", "Please check all parameter values.")
             return
 
         self.start_btn.configure(state="disabled")
@@ -521,9 +581,12 @@ class StrategyTab(ctk.CTkFrame):
             text="⏳  Starting…",
             text_color=LIVE_COL if is_live else ORANGE_COL)
         self._elog(f"Starting — {'🔴 LIVE' if is_live else '📄 Paper'} | "
-                   f"Lots={lot_mult} | Order={order_type} | Offset=₹{lmt_offset}")
+                   f"Lots={lot_mult} | Order={order_type} | Offset=₹{lmt_offset} | "
+                   f"Delta={delta_min}-{delta_max} | Sell=₹{sell_min}-₹{sell_max} | "
+                   f"Hedge=₹{hedge_min}-₹{hedge_max} | MinCredit=₹{net_credit}")
         self.info_lbl.configure(
-            text=f"{'🔴 LIVE' if is_live else '📄 Paper'}  |  Lots={lot_mult}  |  {order_type}")
+            text=f"{'🔴 LIVE' if is_live else '📄 Paper'}  |  Lots={lot_mult}  |  {order_type}  |  "
+                 f"Δ {delta_min}-{delta_max}  |  Sell ₹{sell_min}-₹{sell_max}")
 
         def _run():
             try:
@@ -535,6 +598,13 @@ class StrategyTab(ctk.CTkFrame):
                     lot_multiplier = lot_mult,
                     order_type     = order_type,
                     limit_offset   = lmt_offset,
+                    delta_min      = delta_min,
+                    delta_max      = delta_max,
+                    sell_prem_min  = sell_min,
+                    sell_prem_max  = sell_max,
+                    hedge_prem_min = hedge_min,
+                    hedge_prem_max = hedge_max,
+                    min_net_credit = net_credit,
                 )
                 self._app.start()
                 self._running = True
