@@ -112,28 +112,23 @@ def select_sell_strike(
     if not candidates:
         lgr.warning("No %s candidates in delta %.2f-%.2f / prem ₹%.0f-₹%.0f for LTP=%.2f",
                     ot.upper(), delta_min, delta_max, scan_prem_min, sell_prem_max, nifty_ltp)
-        return None
+        return []
 
     # Sort: 1st preference — multiples of 100; 2nd — closest delta to midpoint
     TARGET_DELTA = (delta_min + delta_max) / 2
     candidates.sort(key=lambda x: (not x["is_multiple"], abs(x["delta"] - TARGET_DELTA)))
 
-    # Find one whose premium meets the entry criteria (user-configured sell range)
-    for c in candidates:
-        if sell_prem_min <= c["premium"] <= sell_prem_max:
-            lgr.info(
-                "Sell strike selected: %s %d | premium=%.2f | delta=%.4f | secId=%d",
-                ot.upper(), int(c["strike"]), c["premium"], c["delta"], c["security_id"]
-            )
-            return c
+    # Return candidates that meet entry sell range first, then rest as fallback
+    in_range  = [c for c in candidates if sell_prem_min <= c["premium"] <= sell_prem_max]
+    out_range = [c for c in candidates if not (sell_prem_min <= c["premium"] <= sell_prem_max)]
 
-    # Best available even if outside sell range — log warning
-    best = candidates[0]
-    lgr.warning(
-        "No %s strike in ₹%.0f-₹%.0f range; best: %d premium=%.2f (outside sell range)",
-        ot.upper(), sell_prem_min, sell_prem_max, int(best["strike"]), best["premium"]
-    )
-    return None
+    ranked = in_range + out_range   # prefer in-range, but still expose out-of-range for caller
+
+    if ranked:
+        lgr.info("%s candidates ranked: %d in-range, %d out-of-range",
+                 ot.upper(), len(in_range), len(out_range))
+
+    return ranked
 
 
 def select_hedge_strike(

@@ -278,7 +278,7 @@ class OIOptionSellerApp:
 
         if pos:
             # ── EXISTING POSITION: check exit signal ──────────────────────
-            leg_data = get_leg_data(strikes, pos["strike"], opt_type)
+            leg_data  = get_leg_data(strikes, pos["strike"], opt_type)
             curr_prem = leg_data["last_price"] if leg_data else pos["sold_premium"]
             curr_oi   = leg_data["oi"] if leg_data else 0
 
@@ -308,54 +308,110 @@ class OIOptionSellerApp:
             self._log(f"   [{leg.upper()}] Holding position — no exit signal")
 
         else:
-            # ── NO POSITION: check entry signal ───────────────────────────
-            # We need to find the right strike first, then check signal
-            # Select candidate strike and check its signal
-            sell_strike = select_sell_strike(
-                strikes, opt_type, self._nifty_ltp,
-                delta_min=self.delta_min, delta_max=self.delta_max,
-                sell_prem_min=self.sell_prem_min, sell_prem_max=self.sell_prem_max,
-                logger=self.logger)
+            # ── NO POSITION: try entry across expiries ─────────────────────
+            # Strategy rule (Section 2.3):
+            #   1st Priority: Current month expiry
+            #   2nd Priority: Next month expiry
+            #   3rd Priority: Far month expiry
+            # Within each expiry, try ALL ranked strike candidates before giving up.
 
-            if sell_strike is None:
-                self._log(f"   [{leg.upper()}] No qualifying strike found for entry")
-                self._last_signals[leg] = "No qualifying strike"
-                return
+            from expiry_selector import get_monthly_expiries
+            from datetime import date as _date
 
-            # Get signal for the selected strike
-            candidate_leg_data = get_leg_data(strikes, sell_strike["strike"], opt_type)
-            sig = compute_signal(candidate_leg_data, logger=self.logger)
-            self._last_signals[leg] = signal_label(sig)
-            self._log(f"   [{leg.upper()}] Strike {int(sell_strike['strike'])} Signal: {signal_label(sig)}")
+            monthly = get_monthly_expiries(self._expiry_list)
+            today   = _date.today()
+            # Build ordered list of expiries to try: current target first, then rest
+            expiries_to_try = [self._target_expiry] if self._target_expiry else []
+            for d in monthly:
+                exp_str = d.strftime("%Y-%m-%d")
+                if exp_str not in expiries_to_try and d >= today:
+                    expiries_to_try.append(exp_str)
 
-            if not is_entry_signal(sig):
-                self._log(f"   [{leg.upper()}] No entry signal — waiting")
-                return
+            entered = False
+            for attempt_expiry in expiries_to_try[:3]:   # max 3 expiries (cur/next/far)
+                if entered:
+                    break
 
-            # Validate sell premium at entry
-            curr_prem = sell_strike["premium"]
-            if not (self.sell_prem_min <= curr_prem <= self.sell_prem_max):
-                self._log(f"   [{leg.upper()}] Premium ₹{curr_prem:.2f} outside sell range — skipping")
-                return
+                # Fetch chain for this expiry if different from current
+                if attempt_expiry != self._target_expiry:
+                    self._log(f"   [{leg.upper()}] Trying next expiry: {attempt_expiry}")
+                    try:
+                        _, attempt_strikes = fetch_and_parse(
+                            self.dhan, attempt_expiry, logger=self.logger)
+                    except Exception as e:
+                        self._log(f"   [{leg.upper()}] Failed to fetch {attempt_expiry}: {e}")
+                        continue
+                else:
+                    attempt_strikes = strikes
 
-            # Select hedge
-            hedge_strike = select_hedge_strike(
-                strikes, opt_type, sell_strike["strike"], self._nifty_ltp,
-                hedge_prem_min=self.hedge_prem_min, hedge_prem_max=self.hedge_prem_max,
-                logger=self.logger)
+                # Get ranked list of sell candidates for this expiry
+                ranked_candidates = select_sell_strike(
+                    attempt_strikes, opt_type, self._nifty_ltp,
+                    delta_min=self.delta_min, delta_max=self.delta_max,
+                    sell_prem_min=self.sell_prem_min, sell_prem_max=self.sell_prem_max,
+                    logger=self.logger)
 
-            if hedge_strike is None:
-                self._log(f"   [{leg.upper()}] No hedge strike found — skipping entry")
-                return
+                if not ranked_candidates:
+                    self._log(f"   [{leg.upper()}] No qualifying strikes in {attempt_expiry}")
+                    continue
 
-            # Validate net credit
-            if not validate_net_credit(curr_prem, hedge_strike["premium"],
-                                        min_net_credit=self.min_net_credit, logger=self.logger):
-                self._log(f"   [{leg.upper()}] Insufficient net credit — skipping")
-                return
+                self._log(f"   [{leg.upper()}] {len(ranked_candidates)} candidate(s) in {attempt_expiry}")
 
-            # Execute the spread
-            self._enter_spread(leg, sell_strike, hedge_strike)
+                # Try each candidate in rank order
+                for sell_strike in ranked_candidates:
+                    strike_val = int(sell_strike["strike"])
+
+                    # Check signal for this specific strike
+                    candidate_data = get_leg_data(attempt_strikes, sell_strike["strike"], opt_type)
+                    sig = compute_signal(candidate_data, logger=self.logger)
+                    self._last_signals[leg] = signal_label(sig)
+                    self._log(f"   [{leg.upper()}] Strike {strike_val} ({attempt_expiry}): {signal_label(sig)}")
+
+                    if not is_entry_signal(sig):
+                        self._log(f"   [{leg.upper()}] Strike {strike_val} no entry signal — trying next")
+                        continue
+
+                    # Validate sell premium
+                    curr_prem = sell_strike["premium"]
+                    if not (self.sell_prem_min <= curr_prem <= self.sell_prem_max):
+                        self._log(f"   [{leg.upper()}] Strike {strike_val} premium ₹{curr_prem:.2f} outside sell range — trying next")
+                        continue
+
+                    # Find hedge for this sell strike
+                    hedge_strike = select_hedge_strike(
+                        attempt_strikes, opt_type, sell_strike["strike"], self._nifty_ltp,
+                        hedge_prem_min=self.hedge_prem_min, hedge_prem_max=self.hedge_prem_max,
+                        logger=self.logger)
+
+                    if hedge_strike is None:
+                        self._log(f"   [{leg.upper()}] Strike {strike_val} no hedge found — trying next")
+                        continue
+
+                    # Validate net credit
+                    if not validate_net_credit(curr_prem, hedge_strike["premium"],
+                                               min_net_credit=self.min_net_credit, logger=self.logger):
+                        self._log(f"   [{leg.upper()}] Strike {strike_val} insufficient net credit "
+                                  f"(₹{curr_prem:.0f} - ₹{hedge_strike['premium']:.0f} = "
+                                  f"₹{curr_prem - hedge_strike['premium']:.0f}) — trying next strike/expiry")
+                        continue
+
+                    # ✅ All checks passed — enter this spread
+                    # Temporarily override target expiry for this leg entry
+                    orig_expiry = self._target_expiry
+                    if attempt_expiry != orig_expiry:
+                        self._log(f"   [{leg.upper()}] Falling back to expiry {attempt_expiry} for entry")
+                        self._target_expiry = attempt_expiry
+
+                    self._enter_spread(leg, sell_strike, hedge_strike)
+
+                    # Restore expiry (position stores its own expiry internally)
+                    self._target_expiry = orig_expiry
+                    entered = True
+                    break
+
+            if not entered:
+                self._log(f"   [{leg.upper()}] No valid entry found across all expiries — waiting")
+                self._last_signals[leg] = "No valid entry found"
 
     # ── Snapshot Routine (3:30 PM) ────────────────────────────────────────────
 
