@@ -14,11 +14,15 @@ Also provides get_snapshot() for GUI dashboard polling.
 =============================================================================
 """
 
+import csv
 import logging
+import logging.handlers
+import sys
 import threading
 import time
 from collections import deque
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config import (
@@ -41,6 +45,12 @@ from sl_manager        import SLManager
 from order_executor    import OrderExecutor
 
 log = logging.getLogger("OIOptionSeller")
+
+# ── PyInstaller-safe base directory ──────────────────────────────────────────
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent
 
 
 class OIOptionSellerApp:
@@ -80,6 +90,17 @@ class OIOptionSellerApp:
         self.hedge_prem_max = float(hedge_prem_max)
         self.min_net_credit = float(min_net_credit)
         self.logger         = logger or log
+
+        # ── Logging setup (same pattern as dhan-ha-trader) ──────────────────
+        today            = datetime.now().strftime("%Y-%m-%d")
+        self._logs_dir   = BASE_DIR / "logs"
+        self._trades_dir = BASE_DIR / "trades"
+        self._logs_dir.mkdir(exist_ok=True)
+        self._trades_dir.mkdir(exist_ok=True)
+        self._log_path   = self._logs_dir   / f"{today}.log"
+        self._trade_path = self._trades_dir / f"{today}.csv"
+        self._setup_logging()
+        self._ensure_trade_log_header()
 
         self.dhan     = DhanClient(client_id, access_token, logger=self.logger)
         self.store    = PositionStore(logger=self.logger)
@@ -152,6 +173,7 @@ class OIOptionSellerApp:
         self._running = False
         self._stop_event.set()
         self._log("⏹ Strategy stopped")
+        self.logger.info("==== OI Option Seller STOP ==== realized_pnl=₹%.2f", self._realized_pnl)
 
     def square_off_all(self):
         """Emergency square off — close all open positions immediately."""
@@ -511,6 +533,15 @@ class OIOptionSellerApp:
             f"   ✅ Position opened: {ot.upper()} {int(sell_strike['strike'])} | "
             f"net credit=₹{net_credit:.2f} | SL=₹{sl_price:.2f}"
         )
+        # Write entry row to trade CSV
+        self._append_trade_log(
+            event_type  = "ENTRY",
+            leg         = leg,
+            position    = position,
+            close_price = 0.0,
+            net_pnl     = 0.0,
+            reason      = f"SIGNAL_{sig.value if hasattr(sig,'value') else 'ENTRY'}",
+        )
 
     def _close_spread(
         self,
@@ -577,6 +608,15 @@ class OIOptionSellerApp:
             f"entry=₹{sold_prem:.2f} exit=₹{close_price:.2f} | "
             f"P&L=₹{net_pnl:+.2f} | Total P&L=₹{self._realized_pnl:+.2f}"
         )
+        # Write exit row to trade CSV
+        self._append_trade_log(
+            event_type  = "EXIT",
+            leg         = leg,
+            position    = position,
+            close_price = close_price,
+            net_pnl     = net_pnl,
+            reason      = reason,
+        )
 
         self.store.clear_position(leg)
 
@@ -622,6 +662,105 @@ class OIOptionSellerApp:
             self._log(f"   ⚡ Expiry updated: {self._target_expiry} → {new_expiry} ({new_label})")
             self._target_expiry = new_expiry
             self._expiry_label  = new_label
+
+    # ── Logging setup ────────────────────────────────────────────────────────
+
+    def _setup_logging(self):
+        """
+        Same pattern as dhan-ha-trader-v9:
+        - TimedRotatingFileHandler → logs/YYYY-MM-DD.log
+        - Rolls at local midnight (IST), keeps 30 days
+        - Per-instance logger to avoid conflicts
+        - propagate=False to prevent double output
+        """
+        self.logger = logging.getLogger(f"oi_option_seller_{id(self)}")
+        self.logger.setLevel(logging.INFO)
+        self.logger.handlers.clear()
+
+        fh = logging.handlers.TimedRotatingFileHandler(
+            self._log_path,
+            when="midnight",
+            interval=1,
+            backupCount=30,
+            encoding="utf-8",
+            utc=False,              # rotate at local midnight (IST)
+        )
+        fh.suffix = "%Y-%m-%d"
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        self.logger.addHandler(fh)
+        self.logger.propagate = False
+        self.logger.info("==== OI Option Seller START ==== log=%s", self._log_path)
+
+    # ── Trade log CSV ─────────────────────────────────────────────────────────
+
+    def _get_todays_trade_path(self) -> Path:
+        """Always returns today's trade CSV path — handles midnight rollover."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        path  = self._trades_dir / f"{today}.csv"
+        if not path.exists():
+            with path.open("w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([
+                    "timestamp", "leg", "opt_type", "strike", "expiry",
+                    "event_type", "mode",
+                    "sold_premium", "hedge_premium", "net_credit",
+                    "close_price", "sl_price",
+                    "lot_size", "lots", "quantity",
+                    "gross_pnl", "net_pnl", "realized_pnl_total",
+                    "reason",
+                ])
+        return path
+
+    def _ensure_trade_log_header(self):
+        """Create today's CSV with header if it doesn't exist yet."""
+        self._get_todays_trade_path()
+
+    def _append_trade_log(self, event_type: str, leg: str,
+                          position: dict, close_price: float = 0.0,
+                          net_pnl: float = 0.0, reason: str = ""):
+        """
+        Append one row to today's trade CSV.
+        Called on every entry and exit event.
+        """
+        try:
+            path     = self._get_todays_trade_path()
+            qty      = int(position.get("lot_size", 0)) * int(position.get("lots", 1))
+            sold     = float(position.get("sold_premium", 0))
+            hedge    = float(position.get("hedge_premium", 0))
+            net_cr   = sold - hedge
+            sl_price = float(position.get("sl_price", 0))
+
+            with path.open("a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    leg.upper(),
+                    position.get("opt_type", "").upper(),
+                    int(position.get("strike", 0)),
+                    position.get("expiry", ""),
+                    event_type,
+                    "LIVE" if self.live_mode else "PAPER",
+                    f"{sold:.2f}",
+                    f"{hedge:.2f}",
+                    f"{net_cr:.2f}",
+                    f"{close_price:.2f}",
+                    f"{sl_price:.2f}",
+                    int(position.get("lot_size", 0)),
+                    int(position.get("lots", 1)),
+                    qty,
+                    f"{net_pnl:.2f}",
+                    f"{net_pnl:.2f}",
+                    f"{self._realized_pnl:.2f}",
+                    reason,
+                ])
+            self.logger.info("TRADE_LOG | %s | %s %s %d | pnl=₹%.2f | reason=%s",
+                             event_type, leg.upper(),
+                             position.get("opt_type","").upper(),
+                             int(position.get("strike", 0)),
+                             net_pnl, reason)
+        except Exception as e:
+            self.logger.warning("Trade log write failed: %s", e)
 
     def _log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")

@@ -584,9 +584,12 @@ class StrategyTab(ctk.CTkFrame):
                    f"Lots={lot_mult} | Order={order_type} | Offset=₹{lmt_offset} | "
                    f"Delta={delta_min}-{delta_max} | Sell=₹{sell_min}-₹{sell_max} | "
                    f"Hedge=₹{hedge_min}-₹{hedge_max} | MinCredit=₹{net_credit}")
+        import datetime as _dt
+        today    = _dt.datetime.now().strftime("%Y-%m-%d")
+        log_path = f"logs/{today}.log  |  trades/{today}.csv"
         self.info_lbl.configure(
             text=f"{'🔴 LIVE' if is_live else '📄 Paper'}  |  Lots={lot_mult}  |  {order_type}  |  "
-                 f"Δ {delta_min}-{delta_max}  |  Sell ₹{sell_min}-₹{sell_max}")
+                 f"Δ {delta_min}-{delta_max}  |  Sell ₹{sell_min}-₹{sell_max}  |  📄 {log_path}")
 
         def _run():
             try:
